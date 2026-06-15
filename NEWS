@@ -63,6 +63,15 @@
 
 ** Notable bug fixes
 
+- Detect and report truncated responses: gptel now shows a "Truncated"
+  status in the mode-line and emits a message when an LLM response was
+  cut short by the model's response length limit (e.g. =max_tokens=
+  reached).  Previously the request was silently marked as "Ready" even
+  though the response was incomplete.  This affected primarily the
+  streaming code path for OpenAI and OpenAI-compatible backends (which
+  includes GitHub Copilot), where the =finish_reason= field on the
+  final stream chunk was not captured.
+
 - Improved error messages: Curl request failures now include more
   diagnostic information.
 

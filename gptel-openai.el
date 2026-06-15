@@ -137,46 +137,53 @@ information if the stream contains it."
                     (gptel--openai-update-tokens usage info))
                   (when (plist-member info :reasoning-chunks) (plist-put info :reasoning-chunks nil)))
               (when-let* ((response (gptel--json-read))
-                          (delta (map-nested-elt response '(:choices 0 :delta))))
-                (if-let* ((content (plist-get delta :content))
-                          ((not (or (eq content :null) (string-empty-p content)))))
-                    (push content content-strs)
-                  ;; No text content, so look for tool calls
-                  (when-let* ((tool-call (map-nested-elt delta '(:tool_calls 0)))
-                              (func (plist-get tool-call :function)))
-                    (if (and-let* ((func-name (plist-get func :name)) ((not (eq func-name :null))))
-                          ;; TEMP: This check is for litellm compatibility, should be removed
-                          (not (equal func-name "null"))) ; new tool block begins
-                        (progn
-                          (when-let* ((partial (plist-get info :partial_json)))
-                            (let* ((prev-tool-call (car (plist-get info :tool-use)))
-                                   (prev-func (plist-get prev-tool-call :function)))
-                              (plist-put prev-func :arguments ;update args for old tool block
-                                         (apply #'concat (nreverse (plist-get info :partial_json)))))
-                            (plist-put info :partial_json nil)) ;clear out finished chain of partial args
-                          ;; Start new chain of partial argument strings
-                          (plist-put info :partial_json (list (plist-get func :arguments)))
-                          ;; NOTE: Do NOT use `push' for this, it prepends and we lose the reference
-                          (plist-put info :tool-use (cons tool-call (plist-get info :tool-use))))
-                      ;; old tool block continues, so continue collecting arguments in :partial_json 
-                      (push (plist-get func :arguments) (plist-get info :partial_json)))))
-                ;; Check for reasoning blocks, currently only used by Openrouter
-                (unless (eq (plist-get info :reasoning-block) 'done)
-                  (if-let* ((reasoning-plist ;reasoning-plist is (:reasoning.* "chunk" ...) or nil
-                             (or (plist-member delta :reasoning) ;for Openrouter and co
-                                 (plist-member delta :reasoning_content))) ;for Deepseek, Llama.cpp
-                            (reasoning-chunk (cadr reasoning-plist))
-                            ((not (or (eq reasoning-chunk :null) (string-empty-p reasoning-chunk)))))
-                      (progn (plist-put info :reasoning ;For stream filter consumption
-                                        (concat (plist-get info :reasoning) reasoning-chunk))
-                             (plist-put info :reasoning-chunks ;To include with tool call results, if any
-                                        (cons reasoning-chunk (or (plist-get info :reasoning-chunks)
-                                                                  (list (car reasoning-plist))))))
-                    ;; Done with reasoning if we get non-empty content
-                    (if-let* (((plist-member info :reasoning)) ;Is this a reasoning model?
-                              (c (plist-get delta :content)) ;Started receiving text content?
-                              ((not (or (eq c :null) (string-blank-p c)))))
-                        (plist-put info :reasoning-block t)))))))) ;Signal end of reasoning block
+                          (choice0 (map-nested-elt response '(:choices 0))))
+                ;; Capture finish_reason if present.  It appears on the final
+                ;; streaming chunk, sometimes with an empty (or absent) :delta.
+                ;; We need it downstream to detect e.g. max_tokens truncation.
+                (when-let* ((reason (plist-get choice0 :finish_reason))
+                            ((not (eq reason :null))))
+                  (plist-put info :stop-reason reason))
+                (let ((delta (plist-get choice0 :delta)))
+                  (if-let* ((content (plist-get delta :content))
+                            ((not (or (eq content :null) (string-empty-p content)))))
+                      (push content content-strs)
+                    ;; No text content, so look for tool calls
+                    (when-let* ((tool-call (map-nested-elt delta '(:tool_calls 0)))
+                                (func (plist-get tool-call :function)))
+                      (if (and-let* ((func-name (plist-get func :name)) ((not (eq func-name :null))))
+                            ;; TEMP: This check is for litellm compatibility, should be removed
+                            (not (equal func-name "null"))) ; new tool block begins
+                          (progn
+                            (when-let* ((partial (plist-get info :partial_json)))
+                              (let* ((prev-tool-call (car (plist-get info :tool-use)))
+                                     (prev-func (plist-get prev-tool-call :function)))
+                                (plist-put prev-func :arguments ;update args for old tool block
+                                           (apply #'concat (nreverse (plist-get info :partial_json)))))
+                              (plist-put info :partial_json nil)) ;clear out finished chain of partial args
+                            ;; Start new chain of partial argument strings
+                            (plist-put info :partial_json (list (plist-get func :arguments)))
+                            ;; NOTE: Do NOT use `push' for this, it prepends and we lose the reference
+                            (plist-put info :tool-use (cons tool-call (plist-get info :tool-use))))
+                        ;; old tool block continues, so continue collecting arguments in :partial_json
+                        (push (plist-get func :arguments) (plist-get info :partial_json)))))
+                  ;; Check for reasoning blocks, currently only used by Openrouter
+                  (unless (eq (plist-get info :reasoning-block) 'done)
+                    (if-let* ((reasoning-plist ;reasoning-plist is (:reasoning.* "chunk" ...) or nil
+                               (or (plist-member delta :reasoning) ;for Openrouter and co
+                                   (plist-member delta :reasoning_content))) ;for Deepseek, Llama.cpp
+                              (reasoning-chunk (cadr reasoning-plist))
+                              ((not (or (eq reasoning-chunk :null) (string-empty-p reasoning-chunk)))))
+                        (progn (plist-put info :reasoning ;For stream filter consumption
+                                          (concat (plist-get info :reasoning) reasoning-chunk))
+                               (plist-put info :reasoning-chunks ;To include with tool call results, if any
+                                          (cons reasoning-chunk (or (plist-get info :reasoning-chunks)
+                                                                    (list (car reasoning-plist))))))
+                      ;; Done with reasoning if we get non-empty content
+                      (if-let* (((plist-member info :reasoning)) ;Is this a reasoning model?
+                                (c (plist-get delta :content)) ;Started receiving text content?
+                                ((not (or (eq c :null) (string-blank-p c)))))
+                          (plist-put info :reasoning-block t))))))))) ;Signal end of reasoning block
       (error (goto-char (match-beginning 0))))
     (apply #'concat (nreverse content-strs))))
 

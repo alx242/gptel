@@ -613,11 +613,22 @@ INFO is the async communication channel for the rewrite request."
 	      (overlay-put ov 'priority 2000)
               (overlay-put ov 'keymap gptel-rewrite-actions-map)
               (overlay-put ov 'mouse-face 'highlight)
-              (let ((status (overlay-get ov 'status)))
+              (let ((status (overlay-get ov 'status))
+                    (truncated (gptel--response-truncated-p info)))
                 (dolist (idx '(0 1 3))
                   (setf (nth idx status)
-                        (propertize (nth idx status) 'face '(success default))))
-                (gptel--rewrite-update-status ov " Ready" '(success default)))
+                        (propertize (nth idx status)
+                                    'face (if truncated
+                                              '(warning default)
+                                            '(success default)))))
+                (if truncated
+                    (let ((reason (plist-get info :stop-reason)))
+                      (gptel--rewrite-update-status
+                       ov (format " Truncated (%s)" reason) '(warning default))
+                      (message "gptel: rewrite truncated by length limit \
+(stop-reason %S).  Consider increasing `gptel-max-tokens'."
+                               reason))
+                  (gptel--rewrite-update-status ov " Ready" '(success default))))
               (overlay-put
                ov 'help-echo
                (format (concat "%s rewrite available: %s or \\[gptel--rewrite-dispatch] for options")

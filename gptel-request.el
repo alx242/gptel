@@ -1880,7 +1880,7 @@ MACHINE is an instance of `gptel-fsm'"
   ;; a second network request: gptel tests for the presence of these flags to
   ;; handle state transitions.  (NOTE: Don't add :uuid to this.)
   (let ((info (gptel-fsm-info fsm)))
-    (dolist (key '(:tool-result :tool-use :error :http-status :reasoning :tokens))
+    (dolist (key '(:tool-result :tool-use :error :http-status :reasoning :tokens :stop-reason))
       (when (plist-get info key)
         (plist-put info key nil))))
   (funcall
@@ -2006,6 +2006,30 @@ callback (for the user), and transition the request state."
 (defun gptel--tool-use-p (info) (plist-get info :tool-use))
 
 (defun gptel--tool-result-p (info) (plist-get info :tool-result))
+
+(defvar gptel--truncated-stop-reasons
+  '("length"                            ;OpenAI, OpenAI-compatible (streaming, non-streaming)
+    "max_tokens"                        ;Anthropic, Bedrock (Anthropic models)
+    "MAX_TOKENS"                        ;Gemini
+    "max_output_tokens"                 ;Bedrock (other models)
+    "max_completion_tokens"             ;Some OpenAI variants
+    "incomplete")                       ;OpenAI Responses API
+  "Stop reasons that indicate a response was truncated.
+
+These are the values an LLM backend may set in the `:stop-reason'
+field of the request `info' plist to indicate that the response
+was cut short by a length or token-budget limit, rather than
+ending naturally.")
+
+(defun gptel--response-truncated-p (info)
+  "Return non-nil if the response in INFO was truncated by a length limit.
+
+The check is case-insensitive and matches symbols, strings or other
+serializable values against `gptel--truncated-stop-reasons'."
+  (when-let* ((reason (plist-get info :stop-reason)))
+    (let ((reason-str (downcase (gptel--to-string reason))))
+      (cl-some (lambda (r) (equal reason-str (downcase r)))
+               gptel--truncated-stop-reasons))))
 
 
 ;;; Send gptel requests

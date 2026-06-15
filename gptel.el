@@ -1396,7 +1396,13 @@ No state transition here since that's handled by the process sentinels."
             (save-excursion (goto-char tracking-marker)
                             (insert gptel-response-separator
                                     (gptel-prompt-prefix-string))))
-          (gptel--update-status  " Ready" 'success)
+          (if (gptel--response-truncated-p info)
+              (let ((reason (plist-get info :stop-reason)))
+                (gptel--update-status (format " Truncated (%s)" reason) 'warning)
+                (message "gptel: response truncated by length limit (stop-reason %S).  \
+Consider increasing `gptel-max-tokens'."
+                         reason))
+            (gptel--update-status " Ready" 'success))
           (gptel--update-token-usage (plist-get info :tokens)
                                      (plist-get info :tokens-full)))))
     ;; Run hook in visible window to set window-point, BUG #269
