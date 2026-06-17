@@ -141,25 +141,58 @@ information if the stream contains it."
                 (if-let* ((content (plist-get delta :content))
                           ((not (or (eq content :null) (string-empty-p content)))))
                     (push content content-strs)
-                  ;; No text content, so look for tool calls
+                  ;; No text content, so look for tool calls.  Each tool_calls
+                  ;; delta carries an :index identifying which of (possibly
+                  ;; several parallel) tool calls it belongs to.  We use this
+                  ;; index to decide when a new tool call block begins, falling
+                  ;; back to the presence of a function :name for providers that
+                  ;; don't send an index.  Relying on :name alone mis-segments
+                  ;; parallel calls to the same tool, which can then collide and
+                  ;; share a tool-call id.
                   (when-let* ((tool-call (map-nested-elt delta '(:tool_calls 0)))
                               (func (plist-get tool-call :function)))
-                    (if (and-let* ((func-name (plist-get func :name)) ((not (eq func-name :null))))
-                          ;; TEMP: This check is for litellm compatibility, should be removed
-                          (not (equal func-name "null"))) ; new tool block begins
-                        (progn
-                          (when-let* ((partial (plist-get info :partial_json)))
-                            (let* ((prev-tool-call (car (plist-get info :tool-use)))
-                                   (prev-func (plist-get prev-tool-call :function)))
-                              (plist-put prev-func :arguments ;update args for old tool block
-                                         (apply #'concat (nreverse (plist-get info :partial_json)))))
-                            (plist-put info :partial_json nil)) ;clear out finished chain of partial args
-                          ;; Start new chain of partial argument strings
-                          (plist-put info :partial_json (list (plist-get func :arguments)))
-                          ;; NOTE: Do NOT use `push' for this, it prepends and we lose the reference
-                          (plist-put info :tool-use (cons tool-call (plist-get info :tool-use))))
-                      ;; old tool block continues, so continue collecting arguments in :partial_json 
-                      (push (plist-get func :arguments) (plist-get info :partial_json)))))
+                    (let* ((index (plist-get tool-call :index))
+                           (cur-call (car (plist-get info :tool-use)))
+                           (new-block
+                            (if (and index (not (eq index :null)))
+                                ;; A new block begins when this chunk's index
+                                ;; differs from the index of the tool call we are
+                                ;; currently accumulating arguments for.
+                                (not (and cur-call
+                                          (equal index (plist-get cur-call :index))))
+                              ;; No index sent: fall back to detecting a new block
+                              ;; by the presence of a non-null function name.
+                              (and-let* ((func-name (plist-get func :name))
+                                         ((not (eq func-name :null)))
+                                         ;; TEMP: litellm compatibility, remove later
+                                         ((not (equal func-name "null"))))
+                                t))))
+                      (if new-block
+                          (progn
+                            (when (plist-get info :partial_json)
+                              (let* ((prev-func (plist-get cur-call :function)))
+                                (plist-put prev-func :arguments ;finalize args for old tool block
+                                           (apply #'concat (nreverse (plist-get info :partial_json)))))
+                              (plist-put info :partial_json nil)) ;clear out finished chain of partial args
+                            ;; Start new chain of partial argument strings
+                            (plist-put info :partial_json (list (plist-get func :arguments)))
+                            ;; NOTE: Do NOT use `push' for this, it prepends and we lose the reference
+                            (plist-put info :tool-use (cons tool-call (plist-get info :tool-use))))
+                        ;; old tool block continues, so continue collecting arguments in :partial_json
+                        ;; Capture id/name if they only arrive on a later chunk for this index.
+                        (let ((cur-func (plist-get cur-call :function)))
+                          (when-let* ((id (plist-get tool-call :id))
+                                      ((not (eq id :null)))
+                                      ((or (null (plist-get cur-call :id))
+                                           (eq (plist-get cur-call :id) :null))))
+                            (plist-put cur-call :id id))
+                          (when-let* ((name (plist-get func :name))
+                                      ((not (eq name :null)))
+                                      ((not (equal name "null"))) ;litellm, see above
+                                      ((or (null (plist-get cur-func :name))
+                                           (eq (plist-get cur-func :name) :null))))
+                            (plist-put cur-func :name name)))
+                        (push (plist-get func :arguments) (plist-get info :partial_json))))))
                 ;; Check for reasoning blocks, currently only used by Openrouter
                 (unless (eq (plist-get info :reasoning-block) 'done)
                   (if-let* ((reasoning-plist ;reasoning-plist is (:reasoning.* "chunk" ...) or nil
